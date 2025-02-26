@@ -1,0 +1,5 @@
+[package]
+name = "snake-lang"
+edition = "2024"
+
+[dependencies]
