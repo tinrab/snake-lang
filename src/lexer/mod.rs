@@ -1,10 +1,12 @@
+pub mod error;
+
 use std::{
     io::{self, Read},
     str,
 };
 
 use crate::{
-    error::{LexerError, LexerErrorKind, LexerResult},
+    lexer::error::{LexerError, LexerErrorKind, LexerResult},
     span::Span,
     symbol::Symbol,
     token::Token,
@@ -23,6 +25,11 @@ pub struct Lexer<R> {
     eof: bool,
 }
 
+const PUNCTUATION: &[char] = &[
+    '{', '}', '(', ')', '[', ']', ';', ':', ',', '.', '+', '-', '*', '/', '%', '=', '!', '<', '>',
+    '&', '|', '^', '?', ':',
+];
+
 impl<R: Read> Lexer<R> {
     pub fn new(reader: R) -> Self {
         Self {
@@ -38,14 +45,14 @@ impl<R: Read> Lexer<R> {
 
     /// Scan a single symbol.
     pub fn scan(&mut self) -> LexerResult<Option<Symbol>> {
-        // Initialize the current character
+        // Initialize the current character.
         if !self.eof && self.current_char.is_none() {
             self.advance()?;
         }
 
         self.skip_whitespace()?;
 
-        // If we've reached EOF, return None
+        // If we've reached EOF, return None.
         let Some(ch) = self.current_char else {
             return Ok(None);
         };
@@ -56,7 +63,6 @@ impl<R: Read> Lexer<R> {
 
         let symbol = match ch {
             ch if ch.is_ascii_digit() => self.scan_number(),
-            ch if ch.is_alphabetic() || ch == '_' => self.scan_identifier(),
 
             '"' => self.scan_string(),
 
@@ -88,14 +94,14 @@ impl<R: Read> Lexer<R> {
                             span: self.get_current_span(),
                         })
                     }
-                    None => Err(LexerError {
-                        kind: LexerErrorKind::UnexpectedEof,
-                        span: self.get_current_eof_span(),
-                    }),
-                    Some(ch) => Err(LexerError {
-                        kind: LexerErrorKind::UnexpectedCharacter(ch),
-                        span: self.get_current_span(),
-                    }),
+                    None => Err(LexerError::new(
+                        LexerErrorKind::UnexpectedEof,
+                        self.get_current_eof_span(),
+                    )),
+                    Some(ch) => Err(LexerError::new(
+                        LexerErrorKind::UnexpectedCharacter(ch),
+                        self.get_current_span(),
+                    )),
                 }
             }
             '|' => {
@@ -109,14 +115,14 @@ impl<R: Read> Lexer<R> {
                             span: self.get_current_span(),
                         })
                     }
-                    None => Err(LexerError {
-                        kind: LexerErrorKind::UnexpectedEof,
-                        span: self.get_current_eof_span(),
-                    }),
-                    Some(ch) => Err(LexerError {
-                        kind: LexerErrorKind::UnexpectedCharacter(ch),
-                        span: self.get_current_span(),
-                    }),
+                    None => Err(LexerError::new(
+                        LexerErrorKind::UnexpectedEof,
+                        self.get_current_eof_span(),
+                    )),
+                    Some(ch) => Err(LexerError::new(
+                        LexerErrorKind::UnexpectedCharacter(ch),
+                        self.get_current_span(),
+                    )),
                 }
             }
             '!' => {
@@ -131,7 +137,7 @@ impl<R: Read> Lexer<R> {
                 } else {
                     Ok(Symbol {
                         lexeme: "!".to_string(),
-                        token: Token::LogicalNot,
+                        token: Token::Bang,
                         span: self.get_current_span(),
                     })
                 }
@@ -171,10 +177,46 @@ impl<R: Read> Lexer<R> {
                 }
             }
 
+            '/' => {
+                self.advance()?;
+                match self.current_char {
+                    // Single line comment.
+                    Some('/') => {
+                        self.advance()?;
+                        while self.current_char != Some('\n') && self.current_char.is_some() {
+                            self.advance()?;
+                        }
+                        return self.scan();
+                    }
+                    // Multi line comment.
+                    Some('*') => {
+                        self.advance()?;
+                        while self.current_char != Some('*') && self.current_char.is_some() {
+                            self.advance()?;
+                        }
+                        if self.current_char == Some('*') {
+                            self.advance()?;
+                            if self.current_char == Some('/') {
+                                self.advance()?;
+                                return self.scan();
+                            }
+                        }
+                        return Err(LexerError::new(
+                            LexerErrorKind::UnexpectedCharacter('*'),
+                            self.get_current_span(),
+                        ));
+                    }
+                    _ => Ok(Symbol {
+                        lexeme: ch.to_string(),
+                        token: Token::Slash,
+                        span: self.get_current_span(),
+                    }),
+                }
+            }
+
             '+' => self.scan_single_char(Token::Plus, ch),
             '-' => self.scan_single_char(Token::Minus, ch),
             '*' => self.scan_single_char(Token::Asterisk, ch),
-            '/' => self.scan_single_char(Token::Slash, ch),
             '(' => self.scan_single_char(Token::OpenParenthesis, ch),
             ')' => self.scan_single_char(Token::CloseParenthesis, ch),
             '{' => self.scan_single_char(Token::OpenBrace, ch),
@@ -186,12 +228,12 @@ impl<R: Read> Lexer<R> {
 
             // Else, fallback to identifier.
             // These could contain unicode characters.
-            ch if !ch.is_whitespace() => self.scan_identifier(),
+            ch if is_valid_identifier_char(ch) => self.scan_identifier(),
 
-            ch => Err(LexerError {
-                kind: LexerErrorKind::UnexpectedCharacter(ch),
-                span: self.get_current_span(),
-            }),
+            ch => Err(LexerError::new(
+                LexerErrorKind::UnexpectedCharacter(ch),
+                self.get_current_span(),
+            )),
         }?;
 
         Ok(Some(symbol))
@@ -219,7 +261,7 @@ impl<R: Read> Lexer<R> {
     fn scan_number(&mut self) -> LexerResult<Symbol> {
         let mut lexeme = String::new();
 
-        // Read integer part
+        // Read integer part.
         while let Some(ch) = self.current_char {
             if ch.is_ascii_digit() {
                 lexeme.push(ch);
@@ -229,7 +271,7 @@ impl<R: Read> Lexer<R> {
             }
         }
 
-        // Check for decimal part
+        // Check for decimal part.
         if self.current_char == Some('.') {
             lexeme.push('.');
             self.advance()?;
@@ -244,7 +286,7 @@ impl<R: Read> Lexer<R> {
             }
         }
 
-        // Check for exponent part
+        // Check for exponent part.
         if let Some('e' | 'E') = self.current_char {
             lexeme.push(self.current_char.unwrap());
             self.advance()?;
@@ -255,7 +297,7 @@ impl<R: Read> Lexer<R> {
                 self.advance()?;
             }
 
-            // Exponent digits
+            // Exponent digits.
             while let Some(ch) = self.current_char {
                 if ch.is_ascii_digit() {
                     lexeme.push(ch);
@@ -278,7 +320,7 @@ impl<R: Read> Lexer<R> {
         let mut lexeme = String::new();
 
         while let Some(ch) = self.current_char {
-            if ch.is_whitespace() {
+            if !is_valid_identifier_char(ch) {
                 break;
             }
             lexeme.push(ch);
@@ -289,8 +331,11 @@ impl<R: Read> Lexer<R> {
         let token = match lexeme.as_str() {
             "true" | "false" => Token::LiteralBoolean,
             "null" => Token::KeywordNull,
+            "let" => Token::KeywordLet,
+            "fn" => Token::KeywordFn,
             "if" => Token::KeywordIf,
             "else" => Token::KeywordElse,
+            "return" => Token::KeywordReturn,
             _ => Token::Identifier,
         };
 
@@ -309,7 +354,7 @@ impl<R: Read> Lexer<R> {
             lexeme.push(ch);
         }
 
-        // Skip the opening quote
+        // Skip the opening quote.
         self.advance()?;
 
         while let Some(ch) = self.current_char {
@@ -318,7 +363,7 @@ impl<R: Read> Lexer<R> {
                     lexeme.push(ch);
                 }
 
-                // Skip the closing quote
+                // Skip the closing quote.
                 self.advance()?;
 
                 break;
@@ -333,7 +378,7 @@ impl<R: Read> Lexer<R> {
                         'r' => '\r',
                         '\\' => '\\',
                         '"' => '"',
-                        _ => esc_ch, // Invalid escape sequence, just use the character
+                        _ => esc_ch, // Invalid escape sequence
                     };
 
                     lexeme.push(escaped);
@@ -363,7 +408,7 @@ impl<R: Read> Lexer<R> {
         let mut buf = [0; 4];
         let mut bytes_read;
 
-        // Read the first byte to determine UTF-8 sequence length
+        // Read the first byte to determine UTF-8 sequence length.
         match self.reader.read(&mut buf[0..1]) {
             Ok(0) => {
                 // EOF reached
@@ -374,7 +419,7 @@ impl<R: Read> Lexer<R> {
             Ok(1) => {
                 bytes_read = 1;
 
-                // Determine how many additional bytes we need based on the first byte
+                // Determine how many additional bytes we need based on the first byte.
                 let additional_bytes = if (buf[0] & 0x80) == 0 {
                     // ASCII character (0xxxxxxx)
                     0
@@ -388,52 +433,43 @@ impl<R: Read> Lexer<R> {
                     // 4-byte sequence (11110xxx)
                     3
                 } else {
-                    // Invalid UTF-8 first byte
-                    return Err(LexerError {
-                        span: self.get_char_span(),
-                        kind: io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "invalid UTF-8 first byte",
-                        )
-                        .into(),
-                    });
+                    // Invalid UTF-8 first byte.
+                    return Err(LexerError::new(
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 first byte")
+                            .into(),
+                        self.get_char_span(),
+                    ));
                 };
 
-                // Read any additional bytes needed
+                // Read any additional bytes needed.
                 if additional_bytes > 0 {
                     match self.reader.read(&mut buf[1..1 + additional_bytes]) {
                         Ok(n) if n == additional_bytes => {
                             bytes_read += n;
                         }
                         Ok(_) => {
-                            return Err(LexerError {
-                                span: self.get_char_span(),
-                                kind: io::Error::new(
+                            return Err(LexerError::new(
+                                io::Error::new(
                                     io::ErrorKind::UnexpectedEof,
                                     "unexpected EOF in the middle of a UTF-8 character",
                                 )
                                 .into(),
-                            });
+                                self.get_char_span(),
+                            ));
                         }
                         Err(err) => {
-                            return Err(LexerError {
-                                span: self.get_char_span(),
-                                kind: err.into(),
-                            });
+                            return Err(LexerError::new(err.into(), self.get_char_span()));
                         }
                     }
                 }
             }
             Err(err) => {
-                return Err(LexerError {
-                    span: self.get_char_span(),
-                    kind: err.into(),
-                });
+                return Err(LexerError::new(err.into(), self.get_char_span()));
             }
             _ => unreachable!(),
         }
 
-        // Convert the bytes to a character
+        // Convert the bytes to a character.
         match str::from_utf8(&buf[0..bytes_read]) {
             Ok(s) => {
                 let ch = s.chars().next().unwrap();
@@ -448,10 +484,10 @@ impl<R: Read> Lexer<R> {
                 self.current_char = Some(ch);
                 Ok(())
             }
-            Err(err) => Err(LexerError {
-                span: self.get_char_span(),
-                kind: err.into(),
-            }),
+            Err(err) => Err(LexerError::new(
+                LexerErrorKind::Utf8(err),
+                self.get_char_span(),
+            )),
         }
     }
 
@@ -501,6 +537,10 @@ impl<R: Read> Lexer<R> {
             self.column.saturating_add(1),
         )
     }
+}
+
+fn is_valid_identifier_char(ch: char) -> bool {
+    !ch.is_whitespace() && !PUNCTUATION.contains(&ch)
 }
 
 #[cfg(test)]
@@ -574,7 +614,7 @@ mod tests {
                 ("=", Equal),
                 ("&&", LogicalAnd),
                 ("||", LogicalOr),
-                ("!", LogicalNot),
+                ("!", Bang),
                 ("==", LogicalEqual),
                 ("!=", LogicalNotEqual),
                 ("<", LogicalLess),
@@ -586,7 +626,7 @@ mod tests {
 
         // Identifiers
         check_tokens!(
-            "foo bar true false null if else",
+            "foo bar true false null if else return let fn",
             [
                 ("foo", Identifier),
                 ("bar", Identifier),
@@ -595,11 +635,24 @@ mod tests {
                 ("null", KeywordNull),
                 ("if", KeywordIf),
                 ("else", KeywordElse),
+                ("return", KeywordReturn),
+                ("let", KeywordLet),
+                ("fn", KeywordFn),
             ]
         );
 
         // Unicode
         check_tokens!("🐍", [("🐍", Identifier)]);
+
+        // Edge cases
+        check_tokens!(
+            "(true)",
+            [
+                ("(", OpenParenthesis),
+                ("true", LiteralBoolean),
+                (")", CloseParenthesis),
+            ]
+        );
     }
 
     #[test]
@@ -620,17 +673,33 @@ mod tests {
     fn check_errors() {
         assert_eq!(
             Lexer::new(Cursor::new("&")).scan().unwrap_err(),
-            LexerError {
-                span: Span::new(0, 0, 1, 1),
-                kind: LexerErrorKind::UnexpectedEof,
-            }
+            LexerError::new(LexerErrorKind::UnexpectedEof, Span::new(0, 0, 1, 1))
         );
         assert_eq!(
             Lexer::new(Cursor::new("|")).scan().unwrap_err(),
-            LexerError {
-                span: Span::new(0, 0, 1, 1),
-                kind: LexerErrorKind::UnexpectedEof,
-            }
+            LexerError::new(LexerErrorKind::UnexpectedEof, Span::new(0, 0, 1, 1))
+        );
+    }
+
+    #[test]
+    fn comments() {
+        check_tokens!(
+            r#"
+            // hi
+            42
+            /* Is this true? */
+            true
+            /*
+                Multiline comment.
+            */
+            "test"
+            // fin
+        "#,
+            [
+                ("42", LiteralNumber),
+                ("true", LiteralBoolean),
+                ("\"test\"", LiteralString),
+            ]
         );
     }
 }

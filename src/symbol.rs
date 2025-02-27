@@ -7,3 +7,13 @@ pub struct Symbol {
     pub token: Token,
     pub span: Span,
 }
+
+impl Symbol {
+    pub fn new_identifier(name: String, span: Span) -> Self {
+        Self {
+            lexeme: name,
+            token: Token::Identifier,
+            span,
+        }
+    }
+}

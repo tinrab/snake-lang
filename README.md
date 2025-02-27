@@ -9,6 +9,5 @@ fn fib(n) {
 }
 
 print("Hello, World!");
-
-print(fib(10));
+print("fib(10)=", fib(10));
 ```
